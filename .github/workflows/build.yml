@@ -1,0 +1,94 @@
+name: Compilar Vision TV Android
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'VisionTV.zip'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Obter ficheiros do repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Instalar plataforma Android (SDK ja vem no runner)
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKM" ] || SDKM="$(command -v sdkmanager)"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Configurar Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Extrair VisionTV.zip
+        run: |
+          if [ ! -f VisionTV.zip ]; then
+            echo "Erro: VisionTV.zip nao encontrado na raiz do repositorio!"
+            exit 1
+          fi
+          rm -rf extracted_project
+          unzip -q -o VisionTV.zip -d extracted_project
+          ROOT_PROJECT_DIR=$(find extracted_project \( -name "settings.gradle.kts" -o -name "settings.gradle" \) | head -n 1 | xargs -r dirname)
+          if [ -z "$ROOT_PROJECT_DIR" ]; then
+            echo "Erro: settings.gradle.kts nao encontrado no projeto!"
+            exit 1
+          fi
+          echo "ROOT_PROJECT_DIR=$ROOT_PROJECT_DIR" >> "$GITHUB_ENV"
+          ls "$ROOT_PROJECT_DIR"
+
+      - name: Compilar APK (release assinado)
+        run: |
+          cd "$ROOT_PROJECT_DIR"
+          set -o pipefail
+          gradle :app:assembleRelease \
+            -PVERSION_CODE="${{ github.run_number }}" \
+            -PUPDATE_REPO="${{ github.repository }}" \
+            --no-daemon --console=plain 2>&1 | tee build.log || {
+            echo "===== ERROS DE COMPILACAO ====="
+            grep -E "^e: |What went wrong" -A4 build.log | head -80
+            exit 1
+          }
+
+      - name: Preparar APK
+        run: |
+          APK=$(ls "$ROOT_PROJECT_DIR"/app/build/outputs/apk/release/*.apk | head -n 1)
+          mkdir -p dist
+          cp "$APK" dist/VisionTV-1.0.apk
+          ls -l dist
+
+      - name: Disponibilizar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VisionTV-APK
+          path: dist/VisionTV-1.0.apk
+          if-no-files-found: error
+
+      - name: Publicar na Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="build-${{ github.run_number }}"
+          gh release create "$TAG" dist/VisionTV-1.0.apk --repo "$GITHUB_REPOSITORY" \
+            --title "Vision TV 1.0 (build ${{ github.run_number }})" \
+            --notes "Vision TV 1.0 - build ${{ github.run_number }}"
+          echo "APK publicado em $TAG"
